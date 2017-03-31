@@ -1,0 +1,521 @@
+03/28/2017
+
+--Sqoop Commands
+
+sqoop import --connect jdbc:oracle:thin:@bootcamp-march2017.cghfmcr8k3ia.us-west-2.rds.amazonaws.com:15210:gravity --username gravity -P --table ADMIN.ASTROPHYSICISTS -m 2 --direct --target-dir /user/ec2-user/raw/astrophysicists_2
+
+sqoop import --connect jdbc:oracle:thin:@bootcamp-march2017.cghfmcr8k3ia.us-west-2.rds.amazonaws.com:15210:gravity --username gravity -P --table ADMIN.GALAXIES -m 1 --direct --target-dir /user/ec2-user/raw/galaxies
+
+sqoop import --connect jdbc:oracle:thin:@bootcamp-march2017.cghfmcr8k3ia.us-west-2.rds.amazonaws.com:15210:gravity --username gravity -P --table ADMIN.DETECTORS -m 1 --direct --target-dir /user/ec2-user/raw/detectors
+
+sqoop import --connect jdbc:oracle:thin:@bootcamp-march2017.cghfmcr8k3ia.us-west-2.rds.amazonaws.com:15210:gravity --username gravity -P --table ADMIN.MEASUREMENTS -m 10 --direct --target-dir /user/ec2-user/raw/measurements
+
+sqoop import --connect jdbc:oracle:thin:@bootcamp-march2017.cghfmcr8k3ia.us-west-2.rds.amazonaws.com:15210:gravity --username gravity -P --table ADMIN.ASTROPHYSICISTS -m 2 --direct --target-dir /user/ec2-user/avro/astrophysicists --as-avrodatafile
+
+
+--Deploy data structures
+
+create databse datamart
+
+--Create tables with string data types in datamart db
+
+create table if not exists datamart.astrophysicists  (
+   astrophysicist_id string,
+   astrophysicist_name string,
+   year_of_birth string,
+   nationality string
+  )
+row format delimited
+  fields terminated by ',';
+
+
+create external table datamart.galaxies (
+	galaxy_id string, 
+	galaxy_name string, 	
+	galaxy_type string, 
+	distance_ly string, 
+	absolute_magnitude string, 
+	apparent_magnitude string, 
+	galaxy_group string) 
+row format delimited fields terminated by ',' 
+location '/user/ec2-user/raw/galaxies';
+
+
+create external table datamart.detectors (
+	detector_id string, 
+	detector_name string, 
+	country string, 
+	latitude string, 
+	longitude string) 
+row format delimited fields terminated by ',' 
+location '/user/ec2-user/raw/detectors';
+
+
+
+create external table datamart.measurements  (
+	measurement_id string, 
+	detector_id string, 
+	galaxy_id string, 
+	astrophysicist_id string, 
+	measurement_time string, 
+	amplitude_1 string, 
+	amplitude_2 string, 
+	amplitude_3 string) 
+row format delimited fields terminated by ',' 
+location '/user/ec2-user/raw/measurements';
+
+
+—- create parquet tables ( actual data types )
+
+create table datamart.measurements_parquet (
+	measurement_id string, 
+	detector_id int, 
+	astrophysicist_id int, 
+	measurement_time double, 
+	amplitude_1 double, 
+	amplitude_2 double, 
+	amplitude_3 double) 
+partitioned by (galaxy_id int) 
+stored as parquet;
+
+
+
+create table datamart.galaxies_parquet (
+	galaxy_id int, 
+	galaxy_name string, 	
+	galaxy_type string, 
+	distance_ly double, 
+	absolute_magnitude double, 
+	apparent_magnitude double, 
+	galaxy_group string) 
+stored as parquet;
+
+
+create table datamart.detectors_parquet (
+	detector_id int, 
+	detector_name string, 
+	country string, 
+	latitude double, 
+	longitude double) 
+stored as parquet;
+
+
+
+create table datamart.astrophysicists_parquet (
+	astrophysicist_id int, 
+	astrophysicist_name string, 
+	year_of_birth int, 
+	nationality string) 
+stored as parquet;
+
+
+
+---Load tables from base tables
+
+
+insert into datamart.galaxies_parquet 
+select 
+	cast(galaxy_id as int), 
+	galaxy_name, galaxy_type, 
+	cast(distance_ly as double), 
+	cast(absolute_magnitude as double), 
+	cast(apparent_magnitude as double), 
+	galaxy_group 
+from datamart.galaxies;
+
+
+insert into datamart.astrophysicists_parquet 
+select 
+	cast(astrophysicist_id as int), 
+	astrophysicist_name, 
+	cast(year_of_birth as int), 
+	nationality 
+from datamart.astrophysicists;
+
+
+insert into datamart.detectors_parquet 
+select 
+	cast(detector_id as int), 
+	detector_name, 
+	country, 
+	cast(detector_name as double), 
+	cast(longitude as double)
+from datamart.detectors;
+
+—- insert the delimited data into the parquet table, 
+
+
+insert into datamart.measurements_parquet 
+	partition (galaxy_id) 
+select 
+	measurement_id,
+	cast(detector_id as int), 
+	cast(astrophysicist_id as int), 
+	cast(measurement_time as double), 
+	cast(amplitude_1 as double),
+	cast(amplitude_2 as double),
+	cast(amplitude_3 as double),	
+	cast(galaxy_id as int)	
+from 
+	datamart.measurements
+where 
+	galaxy_id <= '64';
+
+
+insert into datamart.measurements_parquet 
+	partition (galaxy_id) 
+select 
+	measurement_id,
+	cast(detector_id as int), 
+	cast(astrophysicist_id as int), 
+	cast(measurement_time as double), 
+	cast(amplitude_1 as double),
+	cast(amplitude_2 as double),
+	cast(amplitude_3 as double),	
+	cast(galaxy_id as int)	
+from 
+	datamart.measurements
+where 
+	galaxy_id > '64';
+
+
+
+— create the Detected View
+create view datamart.detected_view as 
+select 
+	* 
+from 
+	datamart.measurements_parquet 
+where 
+	amplitude_1 > 0.995 and amplitude_3 > 0.995 and amplitude_2 < 0.005;
+
+—-  Create Pre-Joined View ( Transactionbs tables along with all dimension / reference tables )
+
+create view datamart.joined_view as 
+select 
+	m.*, 
+	g.galaxy_name, 
+	g.galaxy_type, 
+	g.distance_ly, 
+	g.absolute_magnitude, 
+	g.galaxy_group, 
+	d.detector_name, 
+	d.country, 
+	d.latitude, 
+	d.longitude, 
+	a.astrophysicist_name, 
+	a.year_of_birth,
+	a.nationality 
+from 
+	datamart.measurements_parquet m 
+inner join 
+	datamart.galaxies_parquet g 
+		on m.galaxy_id = g.galaxy_id 
+inner join 
+	datamart.detectors_parquet d 
+		on m.detector_id = d.detector_id 
+inner join 
+	datamart.astrophysicists_parquet a 
+		on m.astrophysicist_id = a.astrophysicist_id;
+
+-- create physical detected
+create table datamart.detected_physical like datamart.measurements_parquet stored as parquet;
+
+insert into datamart.detected_physical partition(galaxy_id) select * from datamart.detected_view;
+
+-- create pre-aggregated
+
+create table datamart.detections_by_country as
+select  
+	country, 
+	count(1) 
+from 
+	datamart.detected_physical a 
+join 
+	datamart.detectors_parquet b 
+		on a.detector_id = b.detector_id 
+group by country; 
+
+-- convert to decimal 
+
+create table datamart.measurements_decimal (
+        measurement_id string,
+        detector_id int,
+        astrophysicist_id int,
+        measurement_time double,
+        amplitude_1 decimal(26,24),
+        amplitude_2 decimal(26,24),
+        amplitude_3 decimal(26,24))
+partitioned by (galaxy_id int)
+stored as parquet;
+
+insert into datamart.measurements_decimal
+        partition (galaxy_id)
+select
+        measurement_id,
+        detector_id,
+        astrophysicist_id,
+        measurement_time,
+        cast (amplitude_1 as decimal(26,24)),
+        cast (amplitude_2 as decimal(26,24)),
+        cast (amplitude_3 as decimal(26,24)),
+        galaxy_id
+from
+        datamart.measurements_parquet
+where
+        galaxy_id <= 64;
+
+insert into datamart.measurements_decimal
+        partition (galaxy_id)
+select
+        measurement_id,
+        detector_id,
+        astrophysicist_id,
+        measurement_time,
+        cast (amplitude_1 as decimal(26,24)),
+        cast (amplitude_2 as decimal(26,24)),
+        cast (amplitude_3 as decimal(26,24)),
+        galaxy_id
+from
+        datamart.measurements_parquet
+where
+        galaxy_id > 64;   
+
+----------------------------------------------------------------------------------------------------------------
+
+03/29/2017
+
+--Commands for creating Oozie Jobs
+
+Oozie Job : load_astrophysicists_o
+sqoop import --connect jdbc:oracle:thin:@bootcamp-march2017.cghfmcr8k3ia.us-west-2.rds.amazonaws.com:15210:gravity --username gravity --password gravity --table ADMIN.ASTROPHYSICISTS -m 2 --direct --target-dir /user/ec2-user/raw/astrophysicists_o
+
+Oozie Job : load_galaxies_o
+sqoop import --connect jdbc:oracle:thin:@bootcamp-march2017.cghfmcr8k3ia.us-west-2.rds.amazonaws.com:15210:gravity --username gravity --password gravity --table ADMIN.GALAXIES -m 1 --direct --target-dir /user/ec2-user/raw/galaxies_o
+
+Oozie Job : load_detectors_o
+sqoop import --connect jdbc:oracle:thin:@bootcamp-march2017.cghfmcr8k3ia.us-west-2.rds.amazonaws.com:15210:gravity --username gravity --password gravity --table ADMIN.DETECTORS -m 1 --direct --target-dir /user/ec2-user/raw/detectors_o
+
+Oozie Job : load_measurements_o
+sqoop import --connect jdbc:oracle:thin:@bootcamp-march2017.cghfmcr8k3ia.us-west-2.rds.amazonaws.com:15210:gravity --username gravity --password gravity --table ADMIN.MEASUREMENTS -m 10 --direct --target-dir /user/ec2-user/raw/measurements_o
+
+--Workflows for invoking multiple tasks / jobs
+
+Workflow Job : wfkl_referencedata
+
+
+--Configuration Setup Steps,
+
+
+--Copy odbc jar on Oozie directory
+
+hdfs dfs -put /home/ec2-user/ojdbc6.jar /user/oozie/share/lib/lib_20170327235958/sqoop/
+
+--Command to be executed afrer copying jar file 
+
+oozie admin -oozie http://ec2-52-36-215-168.us-west-2.compute.amazonaws.com:11000/oozie  -sharelibupdate
+
+
+/home/ec2-user
+
+--Supplimentary table structure to test load from Oozie workflow
+
+
+-- create_table_hv2.sql with following
+
+create table datamart.joined_view_hive2 as 
+select 
+	m.*, 
+	g.galaxy_name, 
+	g.galaxy_type, 
+	g.distance_ly, 
+	g.absolute_magnitude, 
+	g.galaxy_group, 
+	d.detector_name, 
+	d.country, 
+	d.latitude, 
+	d.longitude, 
+	a.astrophysicist_name, 
+	a.year_of_birth,
+	a.nationality 
+from 
+	datamart.measurements_parquet m 
+inner join 
+	datamart.galaxies_parquet g 
+		on m.galaxy_id = g.galaxy_id 
+inner join 
+	datamart.detectors_parquet d 
+		on m.detector_id = d.detector_id 
+inner join 
+	datamart.astrophysicists_parquet a 
+		on m.astrophysicist_id = a.astrophysicist_id;
+		
+--Upload .sql in hdfs
+
+hdfs dfs -put /home/ec2-user/create_table_hv2.sql /user/ec2-user/raw
+
+--Change chomd to 777 for raw directory
+
+
+----------------------------------------------------------------------------------------------------------------
+
+03/30/2017
+
+java -cp bootcamp-0.0.1-SNAPSHOT.jar com.cloudera.fce.bootcamp.MeasurementGenerator ec2-52-26-13-38.us-west-2.compute.amazonaws.com 2000
+
+java -cp bootcamp-0.0.1-SNAPSHOT.jar com.cloudera.fce.bootcamp.MeasurementGenerator ip-172-31-15-245.us-west-2.compute.internal 2000
+
+
+hdfs://ec2-52-26-13-38.us-west-2.compute.amazonaws.com:8020/user/ec2-user/flume
+
+
+
+--Flume HDFS configuration
+
+
+# Please paste flume.conf here. Example:
+
+# Sources, channels, and sinks are defined per
+# agent name, in this case 'tier1'.
+tier1.sources  = source1
+tier1.channels = channel1
+tier1.sinks    = sink1
+
+# For each source, channel, and sink, set
+# standard properties.
+tier1.sources.source1.type     = netcat
+tier1.sources.source1.bind     = 127.0.0.1
+tier1.sources.source1.port     = 9999
+tier1.sources.source1.channels = channel1
+tier1.channels.channel1.type   = memory
+tier1.sinks.sink1.type         = hdfs
+tier1.sinks.sink1.fileType=DataStream
+tier1.sinks.sink1.channel  = channel1
+tier1.sinks.sink1.hdfs.path = hdfs://ip-172-31-13-65.us-west-2.compute.internal:8020/user/ec2-user/flume
+
+
+
+# Other properties are specific to each type of
+# source, channel, or sink. In this case, we
+# specify the capacity of the memory channel.
+tier1.channels.channel1.capacity = 100
+
+
+---Hbase
+
+# Please paste flume.conf here. Example:
+
+# Sources, channels, and sinks are defined per
+# agent name, in this case 'tier1'.
+tier1.sources  = source1
+tier1.channels = channel1
+tier1.sinks    = sink1
+
+# For each source, channel, and sink, set
+# standard properties.
+tier1.sources.source1.type     = netcat
+tier1.sources.source1.bind     = ip-172-31-15-245.us-west-2.compute.internal
+tier1.sources.source1.port     = 9999
+tier1.sources.source1.channels = channel1
+tier1.channels.channel1.type   = memory
+tier1.sinks.sink1.type         =  org.apache.flume.sink.hbase.AsyncHBaseSink
+tier1.sinks.sink1.serializer = org.apache.flume.sink.hbase.SimpleAsyncHbaseEventSerializer
+tier1.sinks.sink1.channel  = channel1
+tier1.sinks.sink1.table = measurements
+# tier1.sinks.sink1.table = measurements_2
+tier1.sinks.sink1.columnFamily = cf1
+
+
+# Other properties are specific to each type of
+# source, channel, or sink. In this case, we
+# specify the capacity of the memory channel.
+
+tier1.sinks.sink1.batchSize =100
+tier1.channels.channel1.capacity = 100000
+tier1.channels.channel1.transactionCapacity = 100
+
+# tier1.sinks.sink1.serializer=org.apache.flume.sink.hbase.RegexHbaseEventSerializer
+# tier1.sinks.sink1.serializer.regex=(.+),(.+),(.+),(.+),(.+)(.+),(.+),(.+)
+
+# tier1.sinks.sink1.serializer.rowKeyIndex = 0
+# tier1.sinks.sink1.serializer.colNames =ROW_KEY,col2,col3,col4,col5,col6,col7,col8
+
+
+---Kafka
+
+
+# Please paste flume.conf here. Example:
+
+# Sources, channels, and sinks are defined per
+# agent name, in this case 'tier1'.
+tier1.sources  = source1
+tier1.channels = channel1
+tier1.sinks    = sink1
+
+# For each source, channel, and sink, set
+# standard properties.
+
+tier1.sources.source1.type     = netcat
+tier1.sources.source1.bind     = ip-172-31-15-245.us-west-2.compute.internal
+tier1.sources.source1.port     = 9999
+tier1.sources.source1.channels = channel1
+tier1.channels.channel1.type   = memory
+
+
+tier1.sinks.sink1.type = org.apache.flume.sink.kafka.KafkaSink
+tier1.sinks.sink1.topic = sink1
+tier1.sinks.sink1.brokerList = ip-172-31-15-245.us-west-2.compute.internal:9092
+tier1.sinks.sink1.channel = channel1
+tier1.sinks.sink1.batchSize = 20
+
+
+--Kafka Setup
+
+--With Name Node
+
+kafka-topics --zookeeper ip-172-31-13-65.us-west-2.compute.internal:2181 --create --topic measurement --partition 10 --replication-factor 1
+
+kafka-topics --zookeeper ip-172-31-13-65.us-west-2.compute.internal:2181 --describe --topic measurement
+
+kafka-console-consumer --topic measurement --zookeeper  ip-172-31-13-65.us-west-2.compute.internal:2181 --from-beginning
+
+kafka-console-consumer --topic measurement --zookeeper  ip-172-31-13-65.us-west-2.compute.internal:2181  --bootstrap-server  ip-172-31-15-245.us-west-2.compute.internal:9092  --from-beginning
+
+
+
+
+
+
+-----------------------------------------------------------------------------------------------------------------
+
+--Other general commands required 
+
+ncat -v -l -p 2000
+
+java -cp bootcamp-0.0.1-SNAPSHOT.jar com.cloudera.fce.bootcamp.MeasurementGenerator ip-172-31-15-245.us-west-2.compute.internal 2000
+
+
+
+
+load data inpath '/user/ec2-user/raw/astrophysicists_2' overwrite into table datamart.astrophysicists;
+
+sudo su hdfs
+
+hdfs dfs -cat cd /user/ec2-user/avro/astrophysicists/part-m-00000.avro
+
+hdfs dfs -ls /user/ec2-user/raw
+ 
+hdfs dfs -ls /user/ec2-user/raw/astrophysicists_2
+
+hdfs dfs -put /etc/hive/conf/hive-site.xml 
+ 
+create table if not exists datamart.astrophysicists_hdfs (
+    astrophysicist_id string,
+    astrophysicist_name string,
+    year_of_birth string,
+    nationality string
+  )
+  location '/user/ec2-user/raw/astrophysicists'
+  ;
+
+-----------------------------------------------------------------------------------------------------------------
